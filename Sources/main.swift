@@ -46,7 +46,22 @@ while running {
     } while event != nil
 }
 
-class WindowView: MTKView {}
+class WindowView: MTKView {
+    override func mouseDragged(with event: NSEvent) {
+        print(#function, event)
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        print(#function, event)
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        print(#function, event)
+        super.mouseUp(with: event)
+    }
+}
 
 class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice;
@@ -90,6 +105,7 @@ class Renderer: NSObject, MTKViewDelegate {
         var vert: MTLFunction
         var frag: MTLFunction
         var vertBuf: MTLBuffer
+        var indxBuf: MTLBuffer
 
         static let shader = """
 #include <simd/simd.h>
@@ -124,14 +140,25 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             pipelineStateDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
             pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineStateDescriptor)
 
-            let vertexData: [Float] = [
-                 0.0,  1.0, 0.0,
-                -0.9, -1.0, 0.0,
-                 0.9, -1.0, 0.0
+            let vertData: [Float] = [
+                 0.5,  0.5, 0.0,
+                 0.5, -0.5, 0.0,
+                -0.5, -0.5, 0.0,
+                -0.5,  0.5, 0.0
             ]
             vertBuf = device.makeBuffer(
-                bytes: vertexData,
-                length: 4 * 9,
+                bytes: vertData,
+                length: 4 * 3 * 4,
+                options: []
+            )!
+
+            let indxData: [UInt16] = [
+                2, 3, 1,
+                0, 1, 2
+            ]
+            indxBuf = device.makeBuffer(
+                bytes: indxData,
+                length: 2 * 6,
                 options: []
             )!
         }
@@ -140,17 +167,17 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             encoder.setRenderPipelineState(pipelineState)
             encoder.setVertexBuffer(vertBuf, offset: 0, index: 0)
 
-            encoder.drawPrimitives(
-                type: .triangle,
-                vertexStart: 0,
-                vertexCount: 3,
-                instanceCount: 1
+            encoder.drawIndexedPrimitives(
+                type: .triangleStrip,
+                indexCount: 6,
+                indexType: .uint16,
+                indexBuffer: indxBuf,
+                indexBufferOffset: 0
             )
 
             encoder.endEncoding()
         }
     }
-
 }
 
 class Window: NSWindow {}
