@@ -1,73 +1,77 @@
 import AppKit
 import MetalKit
 
-let app = NSApplication.shared
-let appDelegate = AppDelegate()
-app.delegate = appDelegate
-app.setActivationPolicy(.regular)
-app.finishLaunching()
-
-let frame = NSRect(x:0, y: 0, width: 1024, height: 768)
-let delegate = WindowDelegate()
-let window = Window(
-    contentRect: frame,
-    styleMask: [.titled, .closable, .miniaturizable, .resizable],
-    backing: .buffered,
-    defer: false
-)
-
-let metalView = WindowView(frame: frame, device: MTLCreateSystemDefaultDevice())
-metalView.colorPixelFormat = .rgba8Unorm
-metalView.depthStencilPixelFormat = .depth32Float
-metalView.preferredFramesPerSecond = 60
-metalView.isPaused = false
-metalView.enableSetNeedsDisplay = false
-
-let renderer = Renderer(device: metalView.device!)
-metalView.delegate = renderer
-
-window.delegate = delegate
-window.title = "base"
-window.contentView = metalView
-window.center()
-window.orderFrontRegardless()
-window.contentView?.updateTrackingAreas()
-
-app.activate(ignoringOtherApps: true)
-
+var windowSize = CGSize(width: 1024, height: 768)
 var running = true
+var renderer: Renderer
+let app = NSApplication.shared
+do {
+    app.setActivationPolicy(.regular)
+    app.finishLaunching()
+
+    let frame = NSRect(x:0, y: 0, width: windowSize.width, height: windowSize.height)
+    let metalView = MTKView(frame: frame, device: MTLCreateSystemDefaultDevice())
+    metalView.colorPixelFormat = .rgba8Unorm
+    metalView.depthStencilPixelFormat = .depth32Float
+    metalView.preferredFramesPerSecond = 60
+    metalView.isPaused = false
+    metalView.enableSetNeedsDisplay = false
+
+    renderer = Renderer(device: metalView.device!)
+    metalView.delegate = renderer
+
+    let windowDelegate = WindowDelegate()
+    let window = NSWindow(
+        contentRect: frame,
+        styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        backing: .buffered,
+        defer: false
+    )
+    window.title = "lines!"
+    window.delegate = windowDelegate
+    window.contentView = metalView
+    window.center()
+    window.orderFrontRegardless()
+    window.contentView?.updateTrackingAreas()
+
+    app.activate(ignoringOtherApps: true)
+
+    class WindowDelegate : NSObject, NSWindowDelegate {
+        func windowWillClose(_ notification: Notification) { running = false }
+    }
+}
+
+var mouseX: Float = 0
+var mouseY: Float = 0
 while running {
     var event:NSEvent?
 
     repeat {
         event = app.nextEvent(matching: .any, until: nil, inMode: .default, dequeue: true)
+        if let e = event {
+
+            let mouseMove = e.type == .mouseMoved ||
+                            e.type == .leftMouseDragged ||
+                            e.type == .rightMouseDragged
+            let sameWindow = mouseMove && e.window == app.mainWindow
+            if  mouseMove && sameWindow {
+                mouseX = 2 * Float(e.locationInWindow.x / windowSize.width)  - 1
+                mouseY = 2 * Float(e.locationInWindow.y / windowSize.height) - 1
+            }
+        }
 
         if event != nil { app.sendEvent(event!) }
     } while event != nil
-}
 
-class WindowView: MTKView {
-    override func mouseDragged(with event: NSEvent) {
-        print(#function, event)
-        super.mouseDragged(with: event)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        print(#function, event)
-        super.mouseDown(with: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        print(#function, event)
-        super.mouseUp(with: event)
-    }
+    renderer.geo.startFrame()
+    renderer.geo.drawLine(mouseX, mouseY)
 }
 
 class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice;
     var commandQueue: MTLCommandQueue
 
-    var geoPass: GeoPass!
+    var geo: GeoPass!
 
     init(device: MTLDevice) {
         self.device = device;
@@ -75,12 +79,12 @@ class Renderer: NSObject, MTKViewDelegate {
         super.init()
 
         self.device.makeLibrary(source: GeoPass.shader, options: nil) { [self] lib, err in
-            self.geoPass = GeoPass(device: device, lib: lib, err: String(describing: err))
+            self.geo = GeoPass(device: device, lib: lib, err: String(describing: err))
         }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        (view as! WindowView).updateTrackingAreas()
+        windowSize = view.convertFromBacking(size)
     }
 
     func draw(in view: MTKView) {
@@ -88,7 +92,7 @@ class Renderer: NSObject, MTKViewDelegate {
 
         let commandBuffer = commandQueue.makeCommandBuffer()!
 
-        geoPass.draw(
+        geo.draw(
             commandBuffer.makeRenderCommandEncoder(
                 descriptor: view.currentRenderPassDescriptor!
             )!
@@ -104,8 +108,13 @@ class Renderer: NSObject, MTKViewDelegate {
 
         var vert: MTLFunction
         var frag: MTLFunction
-        var vertBuf: MTLBuffer
-        var indxBuf: MTLBuffer
+
+        var vertBuf:    MTLBuffer
+        var vertBufCap: Int
+        var indxBuf:    MTLBuffer
+        var indxBufCap: Int
+
+        var indxCount: Int = 0
 
         static let shader = """
 #include <simd/simd.h>
@@ -140,27 +149,46 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             pipelineStateDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
             pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineStateDescriptor)
 
-            let vertData: [Float] = [
-                 0.5,  0.5, 0.0,
-                 0.5, -0.5, 0.0,
-                -0.5, -0.5, 0.0,
-                -0.5,  0.5, 0.0
-            ]
-            vertBuf = device.makeBuffer(
-                bytes: vertData,
-                length: 4 * 3 * 4,
-                options: []
-            )!
+            vertBufCap = 1 << 10
+            vertBuf = device.makeBuffer(length: 4 * vertBufCap, options: [])!
+            indxBufCap = 1 << 10
+            indxBuf = device.makeBuffer(length: 2 * indxBufCap, options: [])!
+        }
 
-            let indxData: [UInt16] = [
-                2, 3, 1,
-                0, 1, 2
-            ]
-            indxBuf = device.makeBuffer(
-                bytes: indxData,
-                length: 2 * 6,
-                options: []
-            )!
+        mutating func startFrame() {
+            indxCount = 0
+        }
+
+        mutating func drawLine(_ x: Float, _ y: Float) {
+            vertBuf
+                .contents()
+                .bindMemory(to: Float.self, capacity: vertBufCap)
+                .update(
+                    from: [
+                        x +  0.1, y +  0.1, 0.0,
+                        x +  0.1, y + -0.1, 0.0,
+                        x + -0.1, y + -0.1, 0.0,
+                        x + -0.1, y +  0.1, 0.0
+                    ],
+                    count: vertBufCap
+                );
+
+
+            // future performance TODO:
+            // - I wonder if this array literal heap allocates?
+            // - triple buffer ala https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/TripleBuffering.html#//apple_ref/doc/uid/TP40016642-CH5-SW1
+            indxBuf
+                .contents()
+                .bindMemory(to: UInt16.self, capacity: indxBufCap)
+                .update(
+                    from: [
+                        2, 3, 1,
+                        0, 1, 2
+                    ],
+                    count: indxBufCap
+                );
+
+            indxCount += 6
         }
 
         func draw(_ encoder: MTLRenderCommandEncoder) {
@@ -180,16 +208,3 @@ fragment float4 frag() // (float4 vert [[stage_in]])
     }
 }
 
-class Window: NSWindow {}
-
-class WindowDelegate : NSObject, NSWindowDelegate {
-    func windowWillClose(_ notification: Notification) { running = false }
-}
-
-class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {}
-
-    func applicationWillTerminate(_ notification: Notification) {
-        running = false
-    }
-}
