@@ -1,7 +1,7 @@
 import AppKit
 import MetalKit
+import simd
 
-var windowSize = CGSize(width: 1024, height: 768)
 var running = true
 var renderer: Renderer
 let app = NSApplication.shared
@@ -9,7 +9,7 @@ do {
     app.setActivationPolicy(.regular)
     app.finishLaunching()
 
-    let frame = NSRect(x:0, y: 0, width: windowSize.width, height: windowSize.height)
+    let frame = NSRect(x:0, y: 0, width: 1024, height: 768)
     let metalView = MTKView(frame: frame, device: MTLCreateSystemDefaultDevice())
     metalView.colorPixelFormat = .rgba8Unorm
     metalView.depthStencilPixelFormat = .depth32Float
@@ -17,7 +17,11 @@ do {
     metalView.isPaused = false
     metalView.enableSetNeedsDisplay = false
 
-    renderer = Renderer(device: metalView.device!)
+    renderer = Renderer(
+        device: metalView.device!,
+        sizeX: Float(frame.width),
+        sizeY: Float(frame.height)
+    )
     metalView.delegate = renderer
 
     let windowDelegate = WindowDelegate()
@@ -54,9 +58,10 @@ while running {
                             e.type == .leftMouseDragged ||
                             e.type == .rightMouseDragged
             let sameWindow = mouseMove && e.window == app.mainWindow
-            if  mouseMove && sameWindow {
-                mouseX = 2 * Float(e.locationInWindow.x / windowSize.width)  - 1
-                mouseY = 2 * Float(e.locationInWindow.y / windowSize.height) - 1
+
+            if mouseMove && sameWindow {
+                mouseX = Float(e.locationInWindow.x)
+                mouseY = Float(e.locationInWindow.y)
             }
         }
 
@@ -70,12 +75,14 @@ while running {
 class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice;
     var commandQueue: MTLCommandQueue
+    var canvasSize: (Float, Float)
 
     var geo: GeoPass!
 
-    init(device: MTLDevice) {
+    init(device: MTLDevice, sizeX: Float, sizeY: Float) {
         self.device = device;
         self.commandQueue = device.makeCommandQueue()!
+        self.canvasSize = (sizeX, sizeY)
         super.init()
 
         self.device.makeLibrary(source: GeoPass.shader, options: nil) { [self] lib, err in
@@ -84,7 +91,8 @@ class Renderer: NSObject, MTKViewDelegate {
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        windowSize = view.convertFromBacking(size)
+        let canvas = view.convertFromBacking(size)
+        canvasSize = (Float(canvas.width), Float(canvas.height))
     }
 
     func draw(in view: MTKView) {
@@ -92,10 +100,26 @@ class Renderer: NSObject, MTKViewDelegate {
 
         let commandBuffer = commandQueue.makeCommandBuffer()!
 
+        var cameraTransform = matrix_identity_float4x4
+        do {
+            let left:   Float = 0
+            let right:  Float = Float(canvasSize.0)
+            let top:    Float = Float(canvasSize.1)
+            let bottom: Float = 0
+
+            let lr: Float = 1 / (left - right)
+            let bt: Float = 1 / (bottom - top)
+            cameraTransform[0, 0] = -2 * lr
+            cameraTransform[1, 1] = -2 * bt
+            cameraTransform[3, 0] = (left + right) * lr
+            cameraTransform[3, 1] = (top + bottom) * bt
+        }
+
         geo.draw(
             commandBuffer.makeRenderCommandEncoder(
                 descriptor: view.currentRenderPassDescriptor!
-            )!
+            )!,
+            transform: &cameraTransform
         )
 
         commandBuffer.present(view.currentDrawable!)
@@ -123,9 +147,10 @@ using namespace metal;
 
 vertex float4 vert(
     constant packed_float3 *vertices  [[ buffer(0) ]],
+    constant simd_float4x4 *transform [[ buffer(1) ]],
     uint vid [[ vertex_id ]])
 {
-    return float4(vertices[vid], 1.0);
+    return (*transform) * float4(vertices[vid], 1.0);
 }
 
 fragment float4 frag() // (float4 vert [[stage_in]])
@@ -165,10 +190,10 @@ fragment float4 frag() // (float4 vert [[stage_in]])
                 .bindMemory(to: Float.self, capacity: vertBufCap)
                 .update(
                     from: [
-                        x +  0.1, y +  0.1, 0.0,
-                        x +  0.1, y + -0.1, 0.0,
-                        x + -0.1, y + -0.1, 0.0,
-                        x + -0.1, y +  0.1, 0.0
+                        x +  10, y +  10, 0.0,
+                        x +  10, y + -10, 0.0,
+                        x + -10, y + -10, 0.0,
+                        x + -10, y +  10, 0.0
                     ],
                     count: vertBufCap
                 );
@@ -191,9 +216,10 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             indxCount += 6
         }
 
-        func draw(_ encoder: MTLRenderCommandEncoder) {
+        func draw(_ encoder: MTLRenderCommandEncoder, transform: inout simd_float4x4) {
             encoder.setRenderPipelineState(pipelineState)
             encoder.setVertexBuffer(vertBuf, offset: 0, index: 0)
+            encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 1)
 
             encoder.drawIndexedPrimitives(
                 type: .triangleStrip,
