@@ -52,19 +52,46 @@ class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice;
     var commandQueue: MTLCommandQueue
 
-    var pipelineState: MTLRenderPipelineState!
-    var library: MTLLibrary!
-
-    var vert: MTLFunction!
-    var frag: MTLFunction!
-    var vertBuf: MTLBuffer!
+    var geoPass: GeoPass!
 
     init(device: MTLDevice) {
         self.device = device;
         self.commandQueue = device.makeCommandQueue()!
         super.init()
 
-        let shader = """
+        self.device.makeLibrary(source: GeoPass.shader, options: nil) { [self] lib, err in
+            self.geoPass = GeoPass(device: device, lib: lib, err: String(describing: err))
+        }
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        (view as! WindowView).updateTrackingAreas()
+    }
+
+    func draw(in view: MTKView) {
+        view.clearColor = MTLClearColorMake(0.117, 0.156, 0.196, 1.0)
+
+        let commandBuffer = commandQueue.makeCommandBuffer()!
+
+        geoPass.draw(
+            commandBuffer.makeRenderCommandEncoder(
+                descriptor: view.currentRenderPassDescriptor!
+            )!
+        )
+
+        commandBuffer.present(view.currentDrawable!)
+        commandBuffer.commit()
+    }
+
+    struct GeoPass {
+        var pipelineState: MTLRenderPipelineState
+        var library: MTLLibrary
+
+        var vert: MTLFunction
+        var frag: MTLFunction
+        var vertBuf: MTLBuffer
+
+        static let shader = """
 #include <simd/simd.h>
 
 using namespace metal;
@@ -82,14 +109,14 @@ fragment float4 frag() // (float4 vert [[stage_in]])
 }
 """
 
-        self.device.makeLibrary(source: shader, options: nil) { [self] lib, err in
+        init(device: MTLDevice, lib: MTLLibrary?, err: String) {
             if lib == nil {
-                fatalError("Invalid shaders: \(String(describing:err))")
+                fatalError("Invalid GeoPass shaders: \(err)")
             }
             self.library = lib!
 
-            vert = library.makeFunction(name: "vert")
-            frag = library.makeFunction(name: "frag")
+            vert = library.makeFunction(name: "vert")!
+            frag = library.makeFunction(name: "frag")!
 
             let pipelineStateDescriptor = MTLRenderPipelineDescriptor()
             pipelineStateDescriptor.vertexFunction = vert
@@ -106,41 +133,24 @@ fragment float4 frag() // (float4 vert [[stage_in]])
                 bytes: vertexData,
                 length: 4 * 9,
                 options: []
-            )
-
-        }
-    }
-
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        (view as! WindowView).updateTrackingAreas()
-    }
-
-    func draw(in view: MTKView) {
-        view.clearColor = MTLClearColorMake(0.117, 0.156, 0.196, 1.0)
-
-        let commandBuffer = commandQueue.makeCommandBuffer()!
-
-        if true {
-            let renderEncoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: view.currentRenderPassDescriptor!
             )!
+        }
 
-            renderEncoder.setRenderPipelineState(pipelineState)
-            renderEncoder.setVertexBuffer(vertBuf, offset: 0, index: 0)
+        func draw(_ encoder: MTLRenderCommandEncoder) {
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setVertexBuffer(vertBuf, offset: 0, index: 0)
 
-            renderEncoder.drawPrimitives(
+            encoder.drawPrimitives(
                 type: .triangle,
                 vertexStart: 0,
                 vertexCount: 3,
                 instanceCount: 1
             )
 
-            renderEncoder.endEncoding()
+            encoder.endEncoding()
         }
-
-        commandBuffer.present(view.currentDrawable!)
-        commandBuffer.commit()
     }
+
 }
 
 class Window: NSWindow {}
