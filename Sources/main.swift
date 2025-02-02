@@ -129,13 +129,35 @@ class Renderer: NSObject, MTKViewDelegate {
             let right:  Float = cameraX + Float(canvasSize.0)*zoom
             let top:    Float = cameraY + Float(canvasSize.1)*zoom
             let bottom: Float = cameraY
+            let near:   Float = -100
+            let far:    Float =  100
 
             let lr: Float = 1.0 / (left - right)
             let bt: Float = 1.0 / (bottom - top)
+            let nf: Float = 1.0 / (near - far)
             cameraTransform[0, 0] = -2 * lr
             cameraTransform[1, 1] = -2 * bt
+            cameraTransform[2, 2] = -nf
             cameraTransform[3, 0] = (left + right) * lr
             cameraTransform[3, 1] = (top + bottom) * bt
+            cameraTransform[3, 2] = near * nf
+
+            var targeted = matrix_identity_float4x4
+            do {
+                let eye = simd_float3(5, 5, 5)
+                let target = simd_float3(0, 0, 0)
+                let up = simd_float3(0, 0, 1)
+
+                // Make a matrix where the forward vector is oriented
+                // directly at the target; get orthonormal bases for the others
+                let z = normalize(eye - target)
+                let x = normalize(cross(up, z))
+                targeted[0] = simd_float4(x, 0)
+                targeted[1] = simd_float4(cross(z, x), 0)
+                targeted[2] = simd_float4(z, 0)
+                targeted[3] = simd_float4(eye, 1)
+            }
+            cameraTransform *= targeted.inverse
         }
 
         geo.draw(
@@ -229,10 +251,10 @@ fragment float4 frag() // (float4 vert [[stage_in]])
                 .bindMemory(to: Float.self, capacity: vertBufCap)
                 .update(
                     from: [
-                        x0 + px, y0 + py, 0.0,
-                        x0 - px, y0 - py, 0.0,
-                        x1 + px, y1 + py, 0.0,
-                        x1 - px, y1 - py, 0.0
+                        x0 + px, y0 + py, 0,
+                        x0 - px, y0 - py, 0,
+                        x1 + px, y1 + py, 0,
+                        x1 - px, y1 - py, 0
                     ],
                     count: 12
                 );
