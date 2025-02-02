@@ -68,35 +68,37 @@ while running {
         if event != nil { app.sendEvent(event!) }
     } while event != nil
 
-    renderer.geo.frameStart()
+    guard renderer.geo != nil else { continue }
+
+    renderer.geo!.frameStart()
     for shape in zones {
         var from = shape[0]
 
-        let thick: Float = 0.15
+        let height: Float = 1.5
 
         for point in shape[1...] {
-            renderer.geo.drawLine(
+            renderer.geo!.drawWall(
                 from.x, from.y,
                 point.x, point.y,
-                thickness: thick
+                height: height
             )
             from = point
         }
 
-        renderer.geo.drawLine(
+        renderer.geo!.drawWall(
             from.x, from.y,
             shape[0].x, shape[0].y,
-            thickness: thick
+            height: height
         )
     }
-    renderer.geo.frameEnd()
+    renderer.geo!.frameEnd()
 }
 class Renderer: NSObject, MTKViewDelegate {
     var device: MTLDevice;
     var commandQueue: MTLCommandQueue
     var canvasSize: (Float, Float)
 
-    var geo: GeoPass!
+    var geo: GeoPass?
 
     init(device: MTLDevice, sizeX: Float, sizeY: Float) {
         self.device = device;
@@ -116,6 +118,7 @@ class Renderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         view.clearColor = MTLClearColorMake(0.117, 0.156, 0.196, 1.0)
+        view.clearDepth = 1.0
 
         let commandBuffer = commandQueue.makeCommandBuffer()!
 
@@ -137,7 +140,7 @@ class Renderer: NSObject, MTKViewDelegate {
             let nf: Float = 1.0 / (near - far)
             cameraTransform[0, 0] = -2 * lr
             cameraTransform[1, 1] = -2 * bt
-            cameraTransform[2, 2] = -nf
+            cameraTransform[2, 2] = nf
             cameraTransform[3, 0] = (left + right) * lr
             cameraTransform[3, 1] = (top + bottom) * bt
             cameraTransform[3, 2] = near * nf
@@ -160,7 +163,7 @@ class Renderer: NSObject, MTKViewDelegate {
             cameraTransform *= targeted.inverse
         }
 
-        geo.draw(
+        geo?.draw(
             commandBuffer.makeRenderCommandEncoder(
                 descriptor: view.currentRenderPassDescriptor!
             )!,
@@ -173,6 +176,7 @@ class Renderer: NSObject, MTKViewDelegate {
 
     struct GeoPass {
         var pipelineState: MTLRenderPipelineState
+        var depthState: MTLDepthStencilState
         var library: MTLLibrary
 
         var vert: MTLFunction
@@ -191,17 +195,24 @@ class Renderer: NSObject, MTKViewDelegate {
 
 using namespace metal;
 
-vertex float4 vert(
+struct VertexOut {
+    float4 position [[position]];
+    float height;
+};
+
+vertex VertexOut vert(
     constant packed_float3 *vertices  [[ buffer(0) ]],
     constant simd_float4x4 *transform [[ buffer(1) ]],
-    uint vid [[ vertex_id ]])
-{
-    return (*transform) * float4(vertices[vid], 1.0);
+    uint vid [[ vertex_id ]]
+) {
+    VertexOut out;
+    out.position = (*transform) * float4(vertices[vid], 1.0);
+    out.height = vertices[vid].z;
+    return out;
 }
 
-fragment float4 frag() // (float4 vert [[stage_in]])
-{
-    return float4(0.7, 1, 1, 1);
+fragment float4 frag(VertexOut v [[stage_in]]) {
+    return float4(0.7, v.height, 1, 1);
 }
 """
 
@@ -214,9 +225,15 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             vert = library.makeFunction(name: "vert")!
             frag = library.makeFunction(name: "frag")!
 
+            let depthDescriptor = MTLDepthStencilDescriptor()
+            depthDescriptor.depthCompareFunction = .lessEqual
+            depthDescriptor.isDepthWriteEnabled = true
+            depthState = device.makeDepthStencilState(descriptor: depthDescriptor)!
+
             let pipelineStateDescriptor = MTLRenderPipelineDescriptor()
             pipelineStateDescriptor.vertexFunction = vert
             pipelineStateDescriptor.fragmentFunction = frag
+            pipelineStateDescriptor.depthAttachmentPixelFormat = .depth32Float
             pipelineStateDescriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
             pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineStateDescriptor)
 
@@ -236,13 +253,7 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             indxBuf.didModifyRange(0..<(2 * indxCount))
         }
 
-        mutating func drawLine(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, thickness: Float) {
-            let dx: Float = x0 - x1
-            let dy: Float = y0 - y1
-            let dlen: Float = sqrtf(dx*dx + dy*dy)
-            let px: Float = -dy / dlen * thickness*0.5
-            let py: Float =  dx / dlen * thickness*0.5
-
+        mutating func drawWall(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, height: Float) {
             let startIndex = UInt16(vertCount / 3)
             // future performance TODO:
             // - I wonder if this array literal heap allocates?
@@ -251,10 +262,10 @@ fragment float4 frag() // (float4 vert [[stage_in]])
                 .bindMemory(to: Float.self, capacity: vertBufCap)
                 .update(
                     from: [
-                        x0 + px, y0 + py, 0,
-                        x0 - px, y0 - py, 0,
-                        x1 + px, y1 + py, 0,
-                        x1 - px, y1 - py, 0
+                        x0, y0, 0 + height,
+                        x0, y0, 0,
+                        x1, y1, 0 + height,
+                        x1, y1, 0
                     ],
                     count: 12
                 );
@@ -278,6 +289,8 @@ fragment float4 frag() // (float4 vert [[stage_in]])
             encoder.setRenderPipelineState(pipelineState)
             encoder.setVertexBuffer(vertBuf, offset: 0, index: 0)
             encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 1)
+
+            encoder.setDepthStencilState(depthState)
 
             encoder.drawIndexedPrimitives(
                 type: .triangle,
