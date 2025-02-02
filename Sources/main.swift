@@ -2,6 +2,8 @@ import AppKit
 import MetalKit
 import simd
 
+let WALL_HEIGHT: Float = 3.15
+
 var running = true
 var renderer: Renderer
 let app = NSApplication.shared
@@ -9,7 +11,7 @@ do {
     app.setActivationPolicy(.regular)
     app.finishLaunching()
 
-    let frame = NSRect(x:0, y: 0, width: 1024, height: 768)
+    let frame = NSRect(x:0, y: 0, width: 1600, height: 900)
     let metalView = MTKView(frame: frame, device: MTLCreateSystemDefaultDevice())
     metalView.colorPixelFormat = .rgba8Unorm
     metalView.depthStencilPixelFormat = .depth32Float
@@ -24,13 +26,13 @@ do {
     metalView.delegate = renderer
 
     let windowDelegate = WindowDelegate()
-    let window = NSWindow(
+    let window = Window(
         contentRect: frame,
         styleMask: [.titled, .closable, .miniaturizable, .resizable],
         backing: .buffered,
         defer: false
     )
-    window.title = "lines!"
+    window.title = "Postal 5: Killrock"
     window.delegate = windowDelegate
     window.contentView = metalView
     window.center()
@@ -42,10 +44,24 @@ do {
     class WindowDelegate : NSObject, NSWindowDelegate {
         func windowWillClose(_ notification: Notification) { running = false }
     }
+    class Window : NSWindow {
+        // this prevents the "beep" sound on keydown
+        override func keyDown(with event:NSEvent) {}
+    }
 }
 
-var mouseX: Float = 0
-var mouseY: Float = 0
+struct Camera {
+    var pitch: Float = Float.pi * 0.98
+    var yaw: Float = 0
+    var pos = simd_float3(8, 27, 1.7)
+
+    var dir: simd_float3 {
+        get { simd_float3(sin(yaw) * cos(pitch), cos(yaw) * cos(pitch), sin(pitch)) }
+    }
+}
+var camera = Camera()
+
+var keysDown = [Bool](repeating: false, count: 100)
 let zones = getZones()
 while running {
     var event:NSEvent?
@@ -53,16 +69,25 @@ while running {
     repeat {
         event = app.nextEvent(matching: .any, until: nil, inMode: .default, dequeue: true)
         if let e = event {
-
             let mouseMove = e.type == .mouseMoved ||
                             e.type == .leftMouseDragged ||
                             e.type == .rightMouseDragged
-            let sameWindow = mouseMove && e.window == app.mainWindow
 
-            if mouseMove && sameWindow {
-                mouseX = Float(e.locationInWindow.x)
-                mouseY = Float(e.locationInWindow.y)
+            if mouseMove && e.pressure > 0 {
+                camera.pitch += Float(e.deltaY) * 0.003
+                camera.yaw += Float(e.deltaX) * 0.003
             }
+
+            repeat {
+                if e.type != .flagsChanged && e.type != .keyDown && e.type != .keyUp { continue }
+
+                let code = Int(e.keyCode)
+                if !(0..<keysDown.count).contains(code) { continue }
+
+                keysDown[code] = e.type == .keyDown
+                keysDown[56] = e.modifierFlags.contains(.shift)
+                if code == 53 { running = false }
+            } while false
         }
 
         if event != nil { app.sendEvent(event!) }
@@ -70,17 +95,34 @@ while running {
 
     guard renderer.geo != nil else { continue }
 
+    // using keycodes rather than e.characters because
+    // keycodes should correspond to locations and thusly be keyboard-layout independent
+    do {
+        var forwards: Float = 0
+        var sideways: Float = 0
+        var jump:     Float = 0
+        if keysDown[13] { forwards += 1 }
+        if keysDown[1 ] { forwards -= 1 }
+        if keysDown[0 ] { sideways -= 1 }
+        if keysDown[2 ] { sideways += 1 }
+        if keysDown[49] { jump += 1 }
+        if keysDown[56] { jump -= 1 }
+
+        let up = simd_float3(0, 0, 1)
+        camera.pos += camera.dir * forwards * 0.001
+        camera.pos += cross(camera.dir, up) * sideways * 0.001
+        camera.pos += jump * up * 0.001
+    }
+
     renderer.geo!.frameStart()
     for shape in zones {
         var from = shape[0]
-
-        let height: Float = 1.5
 
         for point in shape[1...] {
             renderer.geo!.drawWall(
                 from.x, from.y,
                 point.x, point.y,
-                height: height
+                height: WALL_HEIGHT
             )
             from = point
         }
@@ -88,20 +130,20 @@ while running {
         renderer.geo!.drawWall(
             from.x, from.y,
             shape[0].x, shape[0].y,
-            height: height
+            height: WALL_HEIGHT
         )
     }
     renderer.geo!.frameEnd()
 }
 class Renderer: NSObject, MTKViewDelegate {
-    var device: MTLDevice;
+    var device: MTLDevice
     var commandQueue: MTLCommandQueue
     var canvasSize: (Float, Float)
 
     var geo: GeoPass?
 
     init(device: MTLDevice, sizeX: Float, sizeY: Float) {
-        self.device = device;
+        self.device = device
         self.commandQueue = device.makeCommandQueue()!
         self.canvasSize = (sizeX, sizeY)
         super.init()
@@ -124,32 +166,49 @@ class Renderer: NSObject, MTKViewDelegate {
 
         var cameraTransform = matrix_identity_float4x4
         do {
-            let zoom: Float = 0.1
-            let cameraX: Float = -48.5
-            let cameraY: Float = -36
+            let ortho = false
 
-            let left:   Float = cameraX
-            let right:  Float = cameraX + Float(canvasSize.0)*zoom
-            let top:    Float = cameraY + Float(canvasSize.1)*zoom
-            let bottom: Float = cameraY
-            let near:   Float = -100
+            let near:   Float = 0.01
             let far:    Float =  100
 
-            let lr: Float = 1.0 / (left - right)
-            let bt: Float = 1.0 / (bottom - top)
-            let nf: Float = 1.0 / (near - far)
-            cameraTransform[0, 0] = -2 * lr
-            cameraTransform[1, 1] = -2 * bt
-            cameraTransform[2, 2] = nf
-            cameraTransform[3, 0] = (left + right) * lr
-            cameraTransform[3, 1] = (top + bottom) * bt
-            cameraTransform[3, 2] = near * nf
+            if false && ortho {
+                let zoom: Float = 0.1
+                let cameraX: Float = -48.5
+                let cameraY: Float = -36
+
+                let left:   Float = cameraX
+                let right:  Float = cameraX + Float(canvasSize.0)*zoom
+                let top:    Float = cameraY + Float(canvasSize.1)*zoom
+                let bottom: Float = cameraY
+
+                let lr: Float = 1.0 / (left - right)
+                let bt: Float = 1.0 / (bottom - top)
+                let nf: Float = 1.0 / (near - far)
+                cameraTransform[0, 0] = -2 * lr
+                cameraTransform[1, 1] = -2 * bt
+                cameraTransform[2, 2] = nf
+                cameraTransform[3, 0] = (left + right) * lr
+                cameraTransform[3, 1] = (top + bottom) * bt
+                cameraTransform[3, 2] = near * nf
+            } else {
+                let fieldOfView: Float = 45 / 180 * Float.pi
+                let aspect: Float = canvasSize.0 / canvasSize.1
+                let yScale = 1 / tan(fieldOfView * 0.5)
+                let xScale = yScale / aspect
+                let zRange = far - near
+                let zScale = -(far + near) / zRange
+                let wzScale = -2 * far * near / zRange
+                cameraTransform[0] = [xScale, 0, 0, 0]
+                cameraTransform[1] = [0, yScale, 0, 0]
+                cameraTransform[2] = [0, 0, zScale, -1]
+                cameraTransform[3] = [0, 0, wzScale, 0]
+            }
 
             var targeted = matrix_identity_float4x4
             do {
-                let eye = simd_float3(5, 5, 5)
-                let target = simd_float3(0, 0, 0)
-                let up = simd_float3(0, 0, 1)
+                let eye    = camera.pos
+                let target = camera.pos + camera.dir
+                let up     = simd_float3(0, 0, 1)
 
                 // Make a matrix where the forward vector is oriented
                 // directly at the target; get orthonormal bases for the others
@@ -207,7 +266,7 @@ vertex VertexOut vert(
 ) {
     VertexOut out;
     out.position = (*transform) * float4(vertices[vid], 1.0);
-    out.height = vertices[vid].z;
+    out.height = vertices[vid].z / \(WALL_HEIGHT);
     return out;
 }
 
@@ -268,7 +327,7 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
                         x1, y1, 0
                     ],
                     count: 12
-                );
+                )
             vertCount += 12
 
 
@@ -280,7 +339,7 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
                         startIndex + 2, startIndex + 3, startIndex + 1
                     ],
                     count: 6
-                );
+                )
 
             indxCount += 6
         }
@@ -306,7 +365,7 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
 }
 
 func getZones() -> [[simd_float2]] {
-    typealias v2 = simd_float2;
+    typealias v2 = simd_float2
     return [
         [v2(-13.7222, 9.3124), v2(-13.7222, 3.2280), v2(-9.8044, 3.2280), v2(-9.8044, 9.3124)],
         [v2(20.2308, 0.9308), v2(20.2308, -2.2550), v2(24.0808, -2.2550), v2(24.0808, 0.9308)],
