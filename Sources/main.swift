@@ -2,7 +2,10 @@ import AppKit
 import MetalKit
 import simd
 
-let WALL_HEIGHT: Float = 3.15
+let WALL_HEIGHT: Float = 3.8
+let HEAD_HEIGHT: Float = 1.7
+let FIELD_OF_VIEW: Float = 90 / 180 * Float.pi
+let WALK_SPEED: Float = 0.0004
 
 var running = true
 var renderer: Renderer
@@ -53,7 +56,8 @@ do {
 struct Camera {
     var pitch: Float = Float.pi * 0.98
     var yaw: Float = 0
-    var pos = simd_float3(8, 27, 1.7)
+    /* average male height = 1.7 meters */
+    var pos = simd_float3(8, 27, HEAD_HEIGHT)
 
     var dir: simd_float3 {
         get { simd_float3(sin(yaw) * cos(pitch), cos(yaw) * cos(pitch), sin(pitch)) }
@@ -98,20 +102,22 @@ while running {
     // using keycodes rather than e.characters because
     // keycodes should correspond to locations and thusly be keyboard-layout independent
     do {
-        var forwards: Float = 0
-        var sideways: Float = 0
-        var jump:     Float = 0
-        if keysDown[13] { forwards += 1 }
-        if keysDown[1 ] { forwards -= 1 }
-        if keysDown[0 ] { sideways -= 1 }
-        if keysDown[2 ] { sideways += 1 }
-        if keysDown[49] { jump += 1 }
-        if keysDown[56] { jump -= 1 }
+        var forwardsCoefficient: Float = 0
+        var sidewaysCoefficient: Float = 0
+        var jumpCoefficient:     Float = 0
+        if keysDown[13] { forwardsCoefficient += 1 }
+        if keysDown[1 ] { forwardsCoefficient -= 1 }
+        if keysDown[0 ] { sidewaysCoefficient -= 1 }
+        if keysDown[2 ] { sidewaysCoefficient += 1 }
+        if keysDown[49] { jumpCoefficient += 1 }
+        if keysDown[56] { jumpCoefficient -= 1 }
 
-        let up = simd_float3(0, 0, 1)
-        camera.pos += camera.dir * forwards * 0.001
-        camera.pos += cross(camera.dir, up) * sideways * 0.001
-        camera.pos += jump * up * 0.001
+        let upDir = simd_float3(0, 0, 1)
+        let forwardsDir = normalize(simd_float3(camera.dir.x, camera.dir.y, 0))
+        let sidewaysDir = cross(forwardsDir, upDir)
+        camera.pos += forwardsCoefficient * forwardsDir * WALK_SPEED
+        camera.pos += sidewaysCoefficient * sidewaysDir * WALK_SPEED
+        camera.pos += jumpCoefficient * upDir * WALK_SPEED
     }
 
     renderer.geo!.frameStart()
@@ -191,9 +197,8 @@ class Renderer: NSObject, MTKViewDelegate {
                 cameraTransform[3, 1] = (top + bottom) * bt
                 cameraTransform[3, 2] = near * nf
             } else {
-                let fieldOfView: Float = 45 / 180 * Float.pi
                 let aspect: Float = canvasSize.0 / canvasSize.1
-                let yScale = 1 / tan(fieldOfView * 0.5)
+                let yScale = 1 / tan(FIELD_OF_VIEW * 0.5)
                 let xScale = yScale / aspect
                 let zRange = far - near
                 let zScale = -(far + near) / zRange
