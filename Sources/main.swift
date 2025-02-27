@@ -5,7 +5,7 @@ import simd
 let WALL_HEIGHT: Float = 3.8
 let HEAD_HEIGHT: Float = 1.7
 let FIELD_OF_VIEW: Float = 90 / 180 * Float.pi
-let WALK_SPEED: Float = 0.0004
+let WALK_SPEED: Float = 3// 1.2
 
 var running = true
 var renderer: Renderer
@@ -66,6 +66,7 @@ struct Camera {
 var camera = Camera()
 
 var keysDown = [Bool](repeating: false, count: 100)
+var lastFrame = Date()
 let zones = getZones()
 while running {
     var event:NSEvent?
@@ -99,6 +100,9 @@ while running {
 
     guard renderer.geo != nil else { continue }
 
+    let dt = Float(-lastFrame.timeIntervalSinceNow)
+    lastFrame = Date()
+
     // using keycodes rather than e.characters because
     // keycodes should correspond to locations and thusly be keyboard-layout independent
     do {
@@ -115,12 +119,14 @@ while running {
         let upDir = simd_float3(0, 0, 1)
         let forwardsDir = normalize(simd_float3(camera.dir.x, camera.dir.y, 0))
         let sidewaysDir = cross(forwardsDir, upDir)
-        camera.pos += forwardsCoefficient * forwardsDir * WALK_SPEED
-        camera.pos += sidewaysCoefficient * sidewaysDir * WALK_SPEED
-        camera.pos += jumpCoefficient * upDir * WALK_SPEED
+        camera.pos += forwardsCoefficient * forwardsDir * WALK_SPEED * dt
+        camera.pos += sidewaysCoefficient * sidewaysDir * WALK_SPEED * dt
+        camera.pos += jumpCoefficient * upDir * WALK_SPEED * dt
     }
 
     renderer.geo!.frameStart()
+    renderer.geo!.drawPlane( -100, -100, 100,  100, z: 0)
+    renderer.geo!.drawPlane( -100, -100, 100,  100, z: WALL_HEIGHT)
     for shape in zones {
         var from = shape[0]
 
@@ -171,32 +177,47 @@ class Renderer: NSObject, MTKViewDelegate {
         let commandBuffer = commandQueue.makeCommandBuffer()!
 
         var cameraTransform = matrix_identity_float4x4
+        // var minimapTransform = matrix_identity_float4x4
         do {
-            let ortho = false
+            // func ortho(left: Float, right: Float, top: Float, bottom: Float) -> simd_float4x4 {
+            //     let near: Float = -1.0
+            //     let far:  Float =  1.0
 
-            let near:   Float = 0.01
-            let far:    Float =  100
+            //     let lr: Float = 1.0 / (left - right)
+            //     let bt: Float = 1.0 / (bottom - top)
+            //     let nf: Float = 1.0 / (near - far)
+            //     var ret = matrix_identity_float4x4
+            //     ret[0, 0] = -2 * lr
+            //     ret[1, 1] = -2 * bt
+            //     ret[2, 2] = nf
+            //     ret[3, 0] = (left + right) * lr
+            //     ret[3, 1] = (top + bottom) * bt
+            //     ret[3, 2] = near * nf
+            //     return ret
+            // }
 
-            if false && ortho {
-                let zoom: Float = 0.1
-                let cameraX: Float = -48.5
-                let cameraY: Float = -36
+            // /* minimap's orthographic transform ft to the size of the floorplan */
+            // do {
+            //     /* need to adjust these to calculate themselves based on the bounding box
+            //      * of the building */
+            //     let cameraX: Float = -26.5
+            //     let cameraY: Float = -26.5
+            //     let buildingSize: Float = 800
+            //     let ar = canvasSize.1 / canvasSize.0
+            //     let pad: Float = 5
+            //     minimapTransform = ortho(
+            //         left:   cameraX - pad + buildingSize,
+            //         right:  cameraX - pad,
+            //         top:    cameraY - pad,
+            //         bottom: cameraY - pad + buildingSize * ar
+            //     )
+            // }
 
-                let left:   Float = cameraX
-                let right:  Float = cameraX + Float(canvasSize.0)*zoom
-                let top:    Float = cameraY + Float(canvasSize.1)*zoom
-                let bottom: Float = cameraY
+            /* perspective projection matrix */
+            do {
+                let near:   Float = 0.01
+                let far:    Float =  100
 
-                let lr: Float = 1.0 / (left - right)
-                let bt: Float = 1.0 / (bottom - top)
-                let nf: Float = 1.0 / (near - far)
-                cameraTransform[0, 0] = -2 * lr
-                cameraTransform[1, 1] = -2 * bt
-                cameraTransform[2, 2] = nf
-                cameraTransform[3, 0] = (left + right) * lr
-                cameraTransform[3, 1] = (top + bottom) * bt
-                cameraTransform[3, 2] = near * nf
-            } else {
                 let aspect: Float = canvasSize.0 / canvasSize.1
                 let yScale = 1 / tan(FIELD_OF_VIEW * 0.5)
                 let xScale = yScale / aspect
@@ -209,6 +230,7 @@ class Renderer: NSObject, MTKViewDelegate {
                 cameraTransform[3] = [0, 0, wzScale, 0]
             }
 
+            /* view matrix */
             var targeted = matrix_identity_float4x4
             do {
                 let eye    = camera.pos
@@ -227,12 +249,10 @@ class Renderer: NSObject, MTKViewDelegate {
             cameraTransform *= targeted.inverse
         }
 
-        geo?.draw(
-            commandBuffer.makeRenderCommandEncoder(
-                descriptor: view.currentRenderPassDescriptor!
-            )!,
-            transform: &cameraTransform
-        )
+        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentRenderPassDescriptor!)!
+        geo?.draw(encoder, transform: &cameraTransform)
+        // geo?.draw(encoder, transform: &minimapTransform)
+        encoder.endEncoding()
 
         commandBuffer.present(view.currentDrawable!)
         commandBuffer.commit()
@@ -261,22 +281,30 @@ using namespace metal;
 
 struct VertexOut {
     float4 position [[position]];
-    float height;
+    float shadowness; /* this is really just a one-dimensional UV */
+    float flip_shadow; /* this is really just a one-dimensional UV */
 };
 
 vertex VertexOut vert(
-    constant packed_float3 *vertices  [[ buffer(0) ]],
+    constant packed_float4 *vertices  [[ buffer(0) ]],
     constant simd_float4x4 *transform [[ buffer(1) ]],
     uint vid [[ vertex_id ]]
 ) {
     VertexOut out;
-    out.position = (*transform) * float4(vertices[vid], 1.0);
-    out.height = vertices[vid].z / \(WALL_HEIGHT);
+    out.position = (*transform) * float4(vertices[vid].xyz, 1.0);
+    out.shadowness = vertices[vid].w;
     return out;
 }
 
+float easeOutCubic(float x) { return 1.0 - (1.0 - x) * (1.0 - x) * (1.0 - x); }
+
 fragment float4 frag(VertexOut v [[stage_in]]) {
-    return float4(0.7, v.height, 1, 1);
+    float shadowness = abs(v.shadowness);
+    float flip_shadow = sign(v.shadowness);
+    float shade = easeOutCubic(1.0 - 2.0*abs(shadowness - 0.5));
+    if (flip_shadow < 0) shade = easeOutCubic(2.0*abs(shadowness - 0.5));
+    shade = 0.5 + 0.5*shade;
+    return float4(float3(0.7) * shade, 1);
 }
 """
 
@@ -317,8 +345,12 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
             indxBuf.didModifyRange(0..<(2 * indxCount))
         }
 
-        mutating func drawWall(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, height: Float) {
-            let startIndex = UInt16(vertCount / 3)
+        mutating func drawPlane(
+            _ xmin: Float, _ ymin: Float,
+            _ xmax: Float, _ ymax: Float,
+            z: Float
+        ) {
+            let startIndex = UInt16(vertCount / 4)
             // future performance TODO:
             // - I wonder if this array literal heap allocates?
             // - triple buffer ala https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/TripleBuffering.html#//apple_ref/doc/uid/TP40016642-CH5-SW1
@@ -326,14 +358,88 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
                 .bindMemory(to: Float.self, capacity: vertBufCap)
                 .update(
                     from: [
-                        x0, y0, 0 + height,
-                        x0, y0, 0,
-                        x1, y1, 0 + height,
-                        x1, y1, 0
+                        xmax, ymax, z, 0.0,
+                        xmin, ymax, z, 1.0,
+                        xmax, ymin, z, 0.0,
+                        xmin, ymin, z, 1.0,
                     ],
-                    count: 12
+                    count: 16
                 )
-            vertCount += 12
+            vertCount += 16
+
+
+            (indxBuf.contents() + indxCount * MemoryLayout<UInt16>.size)
+                .bindMemory(to: UInt16.self, capacity: indxBufCap)
+                .update(
+                    from: [
+                        startIndex + 0, startIndex + 1, startIndex + 2,
+                        startIndex + 2, startIndex + 3, startIndex + 1
+                    ],
+                    count: 6
+                )
+
+            indxCount += 6
+        }
+
+        mutating func drawLine(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, thickness: Float, z: Float) {
+            let dx: Float = x0 - x1
+            let dy: Float = y0 - y1
+            let dlen: Float = sqrtf(dx*dx + dy*dy)
+            let px: Float = -dy / dlen * thickness*0.5
+            let py: Float =  dx / dlen * thickness*0.5
+
+            let startIndex = UInt16(vertCount / 4)
+            // future performance TODO:
+            // - I wonder if this array literal heap allocates?
+            // - triple buffer ala https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/TripleBuffering.html#//apple_ref/doc/uid/TP40016642-CH5-SW1
+            (vertBuf.contents() + vertCount * MemoryLayout<Float>.size)
+                .bindMemory(to: Float.self, capacity: vertBufCap)
+                .update(
+                    from: [
+                        x0 + px, y0 + py, z,  0.0,
+                        x0 - px, y0 - py, z, -1.0,
+                        x1 + px, y1 + py, z,  0.0,
+                        x1 - px, y1 - py, z, -1.0,
+                    ],
+                    count: 16
+                )
+            vertCount += 16
+
+
+            (indxBuf.contents() + indxCount * MemoryLayout<UInt16>.size)
+                .bindMemory(to: UInt16.self, capacity: indxBufCap)
+                .update(
+                    from: [
+                        startIndex + 0, startIndex + 1, startIndex + 2,
+                        startIndex + 2, startIndex + 3, startIndex + 1
+                    ],
+                    count: 6
+                )
+
+            indxCount += 6
+        }
+
+        mutating func drawWall(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, height: Float) {
+            /* minimap */
+            drawLine(x0, y0, x1, y1, thickness: 2, z: 0 + (abs(x0 + y0 - x1 - y1) * 0.001))
+            drawLine(x0, y0, x1, y1, thickness: 2, z: WALL_HEIGHT - (abs(x0 + y0 - x1 - y1) * 0.001))
+
+            let startIndex = UInt16(vertCount / 4)
+            // future performance TODO:
+            // - I wonder if this array literal heap allocates?
+            // - triple buffer ala https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/TripleBuffering.html#//apple_ref/doc/uid/TP40016642-CH5-SW1
+            (vertBuf.contents() + vertCount * MemoryLayout<Float>.size)
+                .bindMemory(to: Float.self, capacity: vertBufCap)
+                .update(
+                    from: [
+                        x0, y0, 0 + height, 1,
+                        x0, y0, 0         , 0,
+                        x1, y1, 0 + height, 1,
+                        x1, y1, 0,          0
+                    ],
+                    count: 16
+                )
+            vertCount += 16
 
 
             (indxBuf.contents() + indxCount * MemoryLayout<UInt16>.size)
@@ -363,8 +469,6 @@ fragment float4 frag(VertexOut v [[stage_in]]) {
                 indexBuffer: indxBuf,
                 indexBufferOffset: 0
             )
-
-            encoder.endEncoding()
         }
     }
 }
